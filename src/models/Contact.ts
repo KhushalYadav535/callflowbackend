@@ -7,6 +7,13 @@ export type CallStatus =
   | 'NOT_ANSWERED'
   | 'FAILED'
   | 'MAX_RETRY_DONE'
+  | 'PAID'
+  | 'OPT_OUT'
+  | 'DND_EXCLUDED'
+  | 'WITHDRAWN'
+  | 'REASSIGNED'
+
+export type PaymentDisposition = 'paid' | 'promise_to_pay' | 'not_reachable' | 'dispute'
 
 export interface IContact extends Document {
   campaignId: mongoose.Types.ObjectId
@@ -19,6 +26,9 @@ export interface IContact extends Document {
   email: string
   city: string
   callStatus: CallStatus
+  paymentDisposition?: PaymentDisposition | null
+  promiseToPayDate?: Date | null
+  isDisputed?: boolean
   retryCount: number
   lastCalledAt?: Date | null
   nextRetryAt?: Date | null
@@ -39,10 +49,13 @@ const ContactSchema = new Schema<IContact>(
     city: { type: String },
     callStatus: {
       type: String,
-      enum: ['PENDING', 'CALLING', 'CONNECTED', 'NOT_ANSWERED', 'FAILED', 'MAX_RETRY_DONE'],
+      enum: ['PENDING', 'CALLING', 'CONNECTED', 'NOT_ANSWERED', 'FAILED', 'MAX_RETRY_DONE', 'PAID', 'OPT_OUT', 'DND_EXCLUDED', 'WITHDRAWN', 'REASSIGNED'],
       default: 'PENDING',
       index: true
     },
+    paymentDisposition: { type: String, enum: ['paid', 'promise_to_pay', 'not_reachable', 'dispute'] },
+    promiseToPayDate: { type: Date },
+    isDisputed: { type: Boolean, default: false },
     retryCount: { type: Number, default: 0 },
     lastCalledAt: { type: Date },
     nextRetryAt: { type: Date },

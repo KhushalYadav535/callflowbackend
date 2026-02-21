@@ -1,5 +1,7 @@
 import mongoose, { Schema, Document, Model } from 'mongoose'
 
+export type DispositionType = 'paid' | 'promise_to_pay' | 'not_reachable' | 'dispute'
+
 export interface ICallLog extends Document {
   contactId: mongoose.Types.ObjectId
   campaignId: mongoose.Types.ObjectId
@@ -10,6 +12,11 @@ export interface ICallLog extends Document {
   outcome: 'connected' | 'not_answered' | 'voicemail' | 'failed'
   transcript?: string
   recordingUrl?: string
+  disposition?: DispositionType | null
+  promiseToPayDate?: Date | null
+  optOutDetected?: boolean
+  dispatchedAt?: Date | null
+  rawPayload?: Record<string, unknown>
   createdAt: Date
 }
 
@@ -27,7 +34,12 @@ const CallLogSchema = new Schema<ICallLog>(
       required: true
     },
     transcript: { type: String },
-    recordingUrl: { type: String }
+    recordingUrl: { type: String },
+    disposition: { type: String, enum: ['paid', 'promise_to_pay', 'not_reachable', 'dispute'] },
+    promiseToPayDate: { type: Date },
+    optOutDetected: { type: Boolean, default: false },
+    dispatchedAt: { type: Date },
+    rawPayload: { type: Schema.Types.Mixed }
   },
   { timestamps: { createdAt: true, updatedAt: true } }
 )

@@ -38,13 +38,13 @@ export function parseContactsFromBuffer(buffer: Buffer): ParsedContactRow[] {
     return null
   }
 
-  const nameKey = getKey(['name', 'full name'])
-  const phoneKey = getKey(['phone', 'phone number', 'mobile'])
-  const amountKey = getKey(['amount', 'loan amount'])
-  const dueDateKey = getKey(['duedate', 'due date'])
-  const loanTypeKey = getKey(['loantype', 'loan type'])
-  const emailKey = getKey(['email', 'email address'])
-  const cityKey = getKey(['city'])
+  const nameKey = getKey(['name', 'full name', 'fullname', 'customer name', 'customername', 'borrower name', 'borrowername'])
+  const phoneKey = getKey(['phone', 'phone number', 'mobile', 'mobileno', 'cell', 'cellphone', 'contact number', 'contactnumber', 'whatsapp'])
+  const amountKey = getKey(['amount', 'loan amount', 'loanamount', 'outstanding', 'due amount'])
+  const dueDateKey = getKey(['duedate', 'due date', 'payment due', 'last payment date'])
+  const loanTypeKey = getKey(['loantype', 'loan type', 'product', 'product type'])
+  const emailKey = getKey(['email', 'email address', 'emailid', 'e-mail'])
+  const cityKey = getKey(['city', 'location', 'branch'])
 
   if (!nameKey || !phoneKey || !amountKey || !dueDateKey || !loanTypeKey || !emailKey || !cityKey) {
     throw new Error(
