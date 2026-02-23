@@ -9,6 +9,8 @@ const Contact_1 = require("../models/Contact");
 const Campaign_1 = require("../models/Campaign");
 const CallLog_1 = require("../models/CallLog");
 const ComplianceConfig_1 = require("../models/ComplianceConfig");
+const AccountProfile_1 = require("../models/AccountProfile");
+const eventWriter_1 = require("../services/eventWriter");
 const router = (0, express_1.Router)();
 const DISPOSITION_VALUES = ['paid', 'promise_to_pay', 'not_reachable', 'dispute'];
 const OUTCOME_VALUES = ['connected', 'not_answered', 'voicemail', 'failed'];
@@ -28,10 +30,100 @@ function checkOptOut(transcript, keywords) {
     const lower = transcript.toLowerCase();
     return keywords.some((kw) => lower.includes(kw.toLowerCase()));
 }
+async function handleV2Webhook(req, res, body, expectedCompanyId) {
+    const { accountId, vapiCallId, outcome, duration, transcript, disposition, promiseToPayDate } = body;
+    const account = await AccountProfile_1.AccountProfile.findById(accountId);
+    if (!account)
+        return res.status(404).json({ message: 'Account not found' });
+    const companyId = account.companyId;
+    if (expectedCompanyId && companyId.toString() !== expectedCompanyId) {
+        return res.status(403).json({ message: 'Company ID mismatch' });
+    }
+    const now = new Date();
+    const acctObjId = new mongoose_1.default.Types.ObjectId(String(accountId));
+    const botObjId = body.botConfigId ? new mongoose_1.default.Types.ObjectId(String(body.botConfigId)) : undefined;
+    const offering = String(body.offeringId ?? '');
+    const keywords = await getOptOutKeywords(companyId);
+    if (checkOptOut(String(transcript ?? ''), keywords)) {
+        await AccountProfile_1.AccountProfile.updateOne({ _id: accountId }, { $set: { status: 'EXCLUDED' } });
+        await (0, eventWriter_1.writeCallEvent)({
+            companyId,
+            accountId: acctObjId,
+            botConfigId: botObjId,
+            offeringId: offering || undefined,
+            vapiCallId: String(vapiCallId),
+            eventType: 'OPT_OUT_DETECTED',
+            payload: { transcriptSnippet: String(transcript ?? '').slice(0, 200) },
+            source: 'webhook',
+            timestamp: now
+        });
+        await (0, eventWriter_1.writeCallEvent)({
+            companyId,
+            accountId: acctObjId,
+            botConfigId: botObjId,
+            offeringId: offering || undefined,
+            vapiCallId: String(vapiCallId),
+            eventType: outcome === 'connected' ? 'CALL_CONNECTED' : 'CALL_NOT_ANSWERED',
+            payload: { outcome, duration: duration ?? 0 },
+            source: 'webhook',
+            timestamp: now
+        });
+        return res.json({ ok: true, accountStatus: 'EXCLUDED', optOutDetected: true });
+    }
+    const eventType = outcome === 'connected' ? 'CALL_CONNECTED' : 'CALL_NOT_ANSWERED';
+    await (0, eventWriter_1.writeCallEvent)({
+        companyId,
+        accountId: acctObjId,
+        botConfigId: botObjId,
+        offeringId: offering || undefined,
+        vapiCallId: String(vapiCallId),
+        eventType,
+        payload: { outcome, duration: duration ?? 0, transcript },
+        source: 'webhook',
+        timestamp: now
+    });
+    if (disposition && isValidDisposition(String(disposition))) {
+        await (0, eventWriter_1.writeCallEvent)({
+            companyId,
+            accountId: acctObjId,
+            botConfigId: botObjId,
+            offeringId: offering || undefined,
+            vapiCallId: String(vapiCallId),
+            eventType: 'DISPOSITION_SET',
+            payload: {
+                disposition: String(disposition),
+                setBy: 'system',
+                promiseToPayDate: disposition === 'promise_to_pay' && promiseToPayDate ? new Date(String(promiseToPayDate)) : undefined
+            },
+            source: 'webhook',
+            timestamp: now
+        });
+        if (disposition === 'paid') {
+            await AccountProfile_1.AccountProfile.updateOne({ _id: accountId }, { $set: { status: 'COMPLETED' } });
+        }
+    }
+    await (0, eventWriter_1.writeCallEvent)({
+        companyId,
+        accountId: acctObjId,
+        botConfigId: botObjId,
+        offeringId: offering || undefined,
+        vapiCallId: String(vapiCallId),
+        eventType: 'CALL_ENDED',
+        payload: { totalDuration: duration ?? 0, endReason: outcome },
+        source: 'webhook',
+        timestamp: now
+    });
+    return res.json({ ok: true });
+}
 async function handleN8nWebhook(req, res, expectedCompanyId) {
     try {
         const body = req.body || {};
-        const { contactId, campaignId, vapiCallId, outcome, duration, transcript, recordingUrl, disposition, promiseToPayDate } = body;
+        const { contactId, campaignId, accountId, botConfigId, offeringId, vapiCallId, outcome, duration, transcript, recordingUrl, disposition, promiseToPayDate } = body;
+        // V2 account-first flow
+        if (accountId && vapiCallId && outcome) {
+            return handleV2Webhook(req, res, body, expectedCompanyId);
+        }
+        // V1 campaign flow
         if (!contactId || !campaignId || !vapiCallId || !outcome) {
             return res.status(400).json({ message: 'Missing required fields in webhook payload' });
         }
@@ -68,6 +160,16 @@ async function handleN8nWebhook(req, res, expectedCompanyId) {
                 disposition: disposition || null,
                 optOutDetected: true,
                 rawPayload: body
+            });
+            await (0, eventWriter_1.writeCallEvent)({
+                companyId,
+                contactId: contact._id,
+                campaignId: campaign._id,
+                vapiCallId,
+                eventType: 'OPT_OUT_DETECTED',
+                payload: { transcriptSnippet: (transcript ?? '').slice(0, 200) },
+                source: 'webhook',
+                timestamp: new Date()
             });
             return res.json({ ok: true, contactStatus: 'OPT_OUT', optOutDetected: true });
         }
@@ -165,6 +267,39 @@ async function handleN8nWebhook(req, res, expectedCompanyId) {
             disposition: disposition || null,
             promiseToPayDate: disposition === 'promise_to_pay' && promiseToPayDate ? new Date(promiseToPayDate) : null,
             rawPayload: body
+        });
+        const nowEvt = new Date();
+        await (0, eventWriter_1.writeCallEvent)({
+            companyId,
+            contactId: contact._id,
+            campaignId: campaign._id,
+            vapiCallId,
+            eventType: outcome === 'connected' ? 'CALL_CONNECTED' : 'CALL_NOT_ANSWERED',
+            payload: { outcome, duration: duration ?? 0 },
+            source: 'webhook',
+            timestamp: nowEvt
+        });
+        if (disposition && isValidDisposition(disposition)) {
+            await (0, eventWriter_1.writeCallEvent)({
+                companyId,
+                contactId: contact._id,
+                campaignId: campaign._id,
+                vapiCallId,
+                eventType: 'DISPOSITION_SET',
+                payload: { disposition, setBy: 'system', promiseToPayDate: disposition === 'promise_to_pay' && promiseToPayDate ? new Date(promiseToPayDate) : undefined },
+                source: 'webhook',
+                timestamp: nowEvt
+            });
+        }
+        await (0, eventWriter_1.writeCallEvent)({
+            companyId,
+            contactId: contact._id,
+            campaignId: campaign._id,
+            vapiCallId,
+            eventType: 'CALL_ENDED',
+            payload: { totalDuration: duration ?? 0, endReason: outcome },
+            source: 'webhook',
+            timestamp: nowEvt
         });
         return res.json({ ok: true, contactStatus: newStatus });
     }

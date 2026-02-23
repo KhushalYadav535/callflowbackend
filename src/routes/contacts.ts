@@ -7,6 +7,7 @@ import { ReassignLog } from '../models/ReassignLog'
 import { Campaign } from '../models/Campaign'
 import { Company } from '../models/Company'
 import mongoose from 'mongoose'
+import { writeCallEvent } from '../services/eventWriter'
 
 const router = Router()
 
@@ -164,6 +165,21 @@ router.patch('/:contactId/withdraw', authMiddleware, requireRoles('TENANT_ADMIN'
       return res.json({ message: 'Contact withdrawn', contactId: contact._id, status: 'WITHDRAWN' })
     }
     await Contact.updateOne({ _id: contact._id }, { $set: { callStatus: 'WITHDRAWN' } })
+    const { User } = await import('../models/User')
+    let agentEmail = 'unknown'
+    if (req.userId) {
+      const u = await User.findById(req.userId).select('email')
+      if (u) agentEmail = u.email
+    }
+    await writeCallEvent({
+      companyId: new mongoose.Types.ObjectId(companyId),
+      contactId: contact._id,
+      campaignId: contact.campaignId,
+      eventType: 'MANUAL_OVERRIDE',
+      payload: { action: 'withdraw', performedBy: agentEmail },
+      source: 'agent',
+      timestamp: new Date()
+    })
     res.json({ message: 'Contact withdrawn', contactId: contact._id, status: 'WITHDRAWN' })
   } catch (err) {
     console.error(err)
@@ -228,6 +244,15 @@ router.post('/:contactId/reassign', authMiddleware, requireRoles('TENANT_ADMIN',
       targetCampaignId: targetCampaign._id,
       newContactId: newContact._id,
       updatedBy: userEmail
+    })
+    await writeCallEvent({
+      companyId: contact.companyId,
+      contactId: contact._id,
+      campaignId: contact.campaignId,
+      eventType: 'MANUAL_OVERRIDE',
+      payload: { action: 'reassign', targetCampaignId: targetCampaign._id.toString(), performedBy: userEmail },
+      source: 'agent',
+      timestamp: new Date()
     })
     res.json({
       message: 'Contact reassigned',

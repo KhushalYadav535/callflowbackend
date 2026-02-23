@@ -45,6 +45,7 @@ const ReassignLog_1 = require("../models/ReassignLog");
 const Campaign_1 = require("../models/Campaign");
 const Company_1 = require("../models/Company");
 const mongoose_1 = __importDefault(require("mongoose"));
+const eventWriter_1 = require("../services/eventWriter");
 const router = (0, express_1.Router)();
 const DISPOSITION_VALUES = ['paid', 'promise_to_pay', 'not_reachable', 'dispute'];
 function isValidDisposition(v) {
@@ -196,6 +197,22 @@ router.patch('/:contactId/withdraw', auth_1.authMiddleware, (0, auth_1.requireRo
             return res.json({ message: 'Contact withdrawn', contactId: contact._id, status: 'WITHDRAWN' });
         }
         await Contact_1.Contact.updateOne({ _id: contact._id }, { $set: { callStatus: 'WITHDRAWN' } });
+        const { User } = await Promise.resolve().then(() => __importStar(require('../models/User')));
+        let agentEmail = 'unknown';
+        if (req.userId) {
+            const u = await User.findById(req.userId).select('email');
+            if (u)
+                agentEmail = u.email;
+        }
+        await (0, eventWriter_1.writeCallEvent)({
+            companyId: new mongoose_1.default.Types.ObjectId(companyId),
+            contactId: contact._id,
+            campaignId: contact.campaignId,
+            eventType: 'MANUAL_OVERRIDE',
+            payload: { action: 'withdraw', performedBy: agentEmail },
+            source: 'agent',
+            timestamp: new Date()
+        });
         res.json({ message: 'Contact withdrawn', contactId: contact._id, status: 'WITHDRAWN' });
     }
     catch (err) {
@@ -259,6 +276,15 @@ router.post('/:contactId/reassign', auth_1.authMiddleware, (0, auth_1.requireRol
             targetCampaignId: targetCampaign._id,
             newContactId: newContact._id,
             updatedBy: userEmail
+        });
+        await (0, eventWriter_1.writeCallEvent)({
+            companyId: contact.companyId,
+            contactId: contact._id,
+            campaignId: contact.campaignId,
+            eventType: 'MANUAL_OVERRIDE',
+            payload: { action: 'reassign', targetCampaignId: targetCampaign._id.toString(), performedBy: userEmail },
+            source: 'agent',
+            timestamp: new Date()
         });
         res.json({
             message: 'Contact reassigned',

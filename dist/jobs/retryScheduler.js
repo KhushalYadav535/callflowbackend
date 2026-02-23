@@ -37,10 +37,11 @@ async function runRetryDispatch() {
             const campaign = await Campaign_1.Campaign.findById(campaignIdStr);
             if (!campaign || campaign.status !== 'ACTIVE')
                 continue;
-            const company = await Company_1.Company.findById(campaign.companyId).select('n8nWebhookUrl');
+            const company = await Company_1.Company.findById(campaign.companyId).select('n8nWebhookUrl backendBaseUrl');
             const n8nUrl = company?.n8nWebhookUrl || process.env.N8N_WEBHOOK_URL;
             if (!n8nUrl)
                 continue;
+            const backendBaseUrl = company?.backendBaseUrl || process.env.BACKEND_BASE_URL || '';
             const payloads = contacts.map((c) => ({
                 contactId: c._id,
                 campaignId: campaign._id,
@@ -56,7 +57,8 @@ async function runRetryDispatch() {
                 retryAfterHours: campaign.retryAfterHours,
                 campaignType: campaign.type,
                 voice: campaign.voice,
-                language: campaign.language
+                language: campaign.language,
+                backendBaseUrl: backendBaseUrl || undefined
             }));
             const batches = [];
             for (let i = 0; i < payloads.length; i += BATCH_SIZE)

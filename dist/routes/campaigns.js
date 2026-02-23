@@ -12,6 +12,7 @@ const parseContacts_1 = require("../utils/parseContacts");
 const Company_1 = require("../models/Company");
 const ComplianceConfig_1 = require("../models/ComplianceConfig");
 const DndList_1 = require("../models/DndList");
+const eventWriter_1 = require("../services/eventWriter");
 const phoneNormalize_1 = require("../utils/phoneNormalize");
 const mongoose_1 = __importDefault(require("mongoose"));
 const axios_1 = __importDefault(require("axios"));
@@ -245,8 +246,9 @@ router.patch('/:id/launch', auth_1.authMiddleware, (0, auth_1.requireRoles)('TEN
         catch {
             // If timezone fails, allow launch (fallback)
         }
-        const company = await Company_1.Company.findById(companyId).select('n8nWebhookUrl');
+        const company = await Company_1.Company.findById(companyId).select('n8nWebhookUrl backendBaseUrl');
         const n8nUrl = company?.n8nWebhookUrl || process.env.N8N_WEBHOOK_URL;
+        const backendBaseUrl = company?.backendBaseUrl || process.env.BACKEND_BASE_URL || '';
         if (!n8nUrl) {
             return res
                 .status(400)
@@ -310,7 +312,8 @@ router.patch('/:id/launch', auth_1.authMiddleware, (0, auth_1.requireRoles)('TEN
             retryAfterHours: campaign.retryAfterHours,
             campaignType: campaign.type,
             voice: campaign.voice,
-            language: campaign.language
+            language: campaign.language,
+            backendBaseUrl: backendBaseUrl || undefined
         }));
         // Batched dispatch: 10 at a time, 500ms delay between batches (rate limiting)
         const BATCH_SIZE = 10;
@@ -321,7 +324,23 @@ router.patch('/:id/launch', auth_1.authMiddleware, (0, auth_1.requireRoles)('TEN
         }
         void (async () => {
             for (let b = 0; b < batches.length; b++) {
-                await Promise.all(batches[b].map((body) => axios_1.default.post(n8nUrl, body).catch((err) => console.error('Failed to notify n8n for contact', body.contactId, err))));
+                await Promise.all(batches[b].map(async (body) => {
+                    try {
+                        await axios_1.default.post(n8nUrl, body);
+                        await (0, eventWriter_1.writeCallEvent)({
+                            companyId: companyObjectId,
+                            contactId: body.contactId,
+                            campaignId: campaign._id,
+                            eventType: 'CALL_DISPATCHED',
+                            payload: { dispatchedAt: new Date(), triggerReason: 'campaign_launch' },
+                            source: 'system',
+                            timestamp: new Date()
+                        });
+                    }
+                    catch (err) {
+                        console.error('Failed to notify n8n for contact', body.contactId, err);
+                    }
+                }));
                 if (b < batches.length - 1)
                     await new Promise((r) => setTimeout(r, BATCH_DELAY_MS));
             }

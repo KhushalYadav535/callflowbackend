@@ -7,6 +7,7 @@ import { parseContactsFromBuffer } from '../utils/parseContacts'
 import { Company } from '../models/Company'
 import { ComplianceConfig } from '../models/ComplianceConfig'
 import { DndList } from '../models/DndList'
+import { writeCallEvent } from '../services/eventWriter'
 import { normalisePhone } from '../utils/phoneNormalize'
 import mongoose from 'mongoose'
 import axios from 'axios'
@@ -263,8 +264,9 @@ router.patch('/:id/launch', authMiddleware, requireRoles('TENANT_ADMIN', 'CAMPAI
       // If timezone fails, allow launch (fallback)
     }
 
-    const company = await Company.findById(companyId).select('n8nWebhookUrl')
+    const company = await Company.findById(companyId).select('n8nWebhookUrl backendBaseUrl')
     const n8nUrl = company?.n8nWebhookUrl || process.env.N8N_WEBHOOK_URL
+    const backendBaseUrl = company?.backendBaseUrl || process.env.BACKEND_BASE_URL || ''
     if (!n8nUrl) {
       return res
         .status(400)
@@ -340,7 +342,8 @@ router.patch('/:id/launch', authMiddleware, requireRoles('TENANT_ADMIN', 'CAMPAI
       retryAfterHours: campaign.retryAfterHours,
       campaignType: campaign.type,
       voice: campaign.voice,
-      language: campaign.language
+      language: campaign.language,
+      backendBaseUrl: backendBaseUrl || undefined
     }))
 
     // Batched dispatch: 10 at a time, 500ms delay between batches (rate limiting)
@@ -353,9 +356,22 @@ router.patch('/:id/launch', authMiddleware, requireRoles('TENANT_ADMIN', 'CAMPAI
     void (async () => {
       for (let b = 0; b < batches.length; b++) {
         await Promise.all(
-          batches[b].map((body) =>
-            axios.post(n8nUrl, body).catch((err) => console.error('Failed to notify n8n for contact', body.contactId, err))
-          )
+          batches[b].map(async (body) => {
+            try {
+              await axios.post(n8nUrl, body)
+              await writeCallEvent({
+                companyId: companyObjectId,
+                contactId: body.contactId,
+                campaignId: campaign._id,
+                eventType: 'CALL_DISPATCHED',
+                payload: { dispatchedAt: new Date(), triggerReason: 'campaign_launch' },
+                source: 'system',
+                timestamp: new Date()
+              })
+            } catch (err) {
+              console.error('Failed to notify n8n for contact', body.contactId, err)
+            }
+          })
         )
         if (b < batches.length - 1) await new Promise((r) => setTimeout(r, BATCH_DELAY_MS))
       }

@@ -3,6 +3,7 @@ import mongoose from 'mongoose'
 import { authMiddleware, AuthRequest } from '../middleware/auth'
 import { CallLog } from '../models/CallLog'
 import { Contact } from '../models/Contact'
+import { AccountProfile } from '../models/AccountProfile'
 
 const router = Router()
 
@@ -12,11 +13,18 @@ router.get('/stats', authMiddleware, async (req: AuthRequest, res) => {
     const companyId = req.companyId!
     const companyObjectId = new mongoose.Types.ObjectId(companyId)
 
-    const [totalCallsResult, connectedResult, promiseToPayResult, paidResult] = await Promise.all([
+    const [
+      totalCallsResult,
+      connectedResult,
+      promiseToPayResult,
+      paidResult,
+      accountCount
+    ] = await Promise.all([
       CallLog.countDocuments({ companyId: companyObjectId }),
       CallLog.countDocuments({ companyId: companyObjectId, outcome: 'connected' }),
       Contact.countDocuments({ companyId: companyObjectId, paymentDisposition: 'promise_to_pay' }),
-      Contact.countDocuments({ companyId: companyObjectId, paymentDisposition: 'paid' })
+      Contact.countDocuments({ companyId: companyObjectId, paymentDisposition: 'paid' }),
+      AccountProfile.countDocuments({ companyId: companyObjectId })
     ])
 
     const totalCallsMade = totalCallsResult
@@ -30,7 +38,8 @@ router.get('/stats', authMiddleware, async (req: AuthRequest, res) => {
       callsConnected,
       promiseToPayCount,
       paidCount,
-      connectRate
+      connectRate,
+      accountCount
     })
   } catch (err) {
     console.error(err)

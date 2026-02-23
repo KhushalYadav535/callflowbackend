@@ -1,17 +1,58 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const mongoose_1 = __importDefault(require("mongoose"));
+const crypto_1 = __importDefault(require("crypto"));
 const multer_1 = __importDefault(require("multer"));
 const xlsx_1 = __importDefault(require("xlsx"));
 const auth_1 = require("../middleware/auth");
 const Company_1 = require("../models/Company");
 const ComplianceConfig_1 = require("../models/ComplianceConfig");
 const DndList_1 = require("../models/DndList");
+const PlatformOffering_1 = require("../models/PlatformOffering");
+const TenantEntitlement_1 = require("../models/TenantEntitlement");
+const TenantOfferingState_1 = require("../models/TenantOfferingState");
+const DataSourceConfig_1 = require("../models/DataSourceConfig");
+const AccountProfile_1 = require("../models/AccountProfile");
 const phoneNormalize_1 = require("../utils/phoneNormalize");
+const credentialEncryption_1 = require("../services/credentialEncryption");
+const eventWriter_1 = require("../services/eventWriter");
 const router = (0, express_1.Router)();
 const upload = (0, multer_1.default)({ storage: multer_1.default.memoryStorage() });
 const HHMM_REGEX = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -212,6 +253,76 @@ router.get('/dnd-count', auth_1.authMiddleware, (0, auth_1.requireRoles)('TENANT
         res.status(500).json({ message: 'Failed to get DND count' });
     }
 });
+// GET /api/settings/offerings - List offerings (provisioned + state)
+router.get('/offerings', auth_1.authMiddleware, (0, auth_1.requireRoles)('TENANT_ADMIN', 'CAMPAIGN_MANAGER'), async (req, res) => {
+    try {
+        const companyId = req.companyId;
+        const companyObjId = new mongoose_1.default.Types.ObjectId(companyId);
+        const offerings = await PlatformOffering_1.PlatformOffering.find({ isAvailable: true }).lean();
+        const entitlements = await TenantEntitlement_1.TenantEntitlement.find({ companyId: companyObjId }).lean();
+        const states = await TenantOfferingState_1.TenantOfferingState.find({ companyId: companyObjId }).lean();
+        const entMap = Object.fromEntries(entitlements.map((e) => [e.offeringId, e]));
+        const stateMap = Object.fromEntries(states.map((s) => [s.offeringId, s]));
+        const result = offerings.map((o) => ({
+            ...o,
+            isProvisioned: entMap[o.offeringId]?.isProvisioned ?? false,
+            isActive: stateMap[o.offeringId]?.isActive ?? false,
+            toggledBy: stateMap[o.offeringId]?.toggledBy,
+            deactivationReason: stateMap[o.offeringId]?.deactivationReason,
+            allowedCapabilities: entMap[o.offeringId]?.configLimits?.allowedCapabilities ?? o.capabilities ?? []
+        }));
+        res.json({ offerings: result });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Failed to load offerings' });
+    }
+});
+// PATCH /api/settings/offerings/:offeringId/state - Toggle tenant offering state
+router.patch('/offerings/:offeringId/state', auth_1.authMiddleware, (0, auth_1.requireRoles)('TENANT_ADMIN', 'CAMPAIGN_MANAGER'), async (req, res) => {
+    try {
+        const companyId = req.companyId;
+        const { offeringId } = req.params;
+        const { isActive, deactivationReason } = req.body;
+        const companyObjId = new mongoose_1.default.Types.ObjectId(companyId);
+        const ent = await TenantEntitlement_1.TenantEntitlement.findOne({ companyId: companyObjId, offeringId, isProvisioned: true });
+        if (!ent)
+            return res.status(403).json({ message: 'Offering not provisioned for this tenant' });
+        const { User } = await Promise.resolve().then(() => __importStar(require('../models/User')));
+        let toggledBy = 'unknown';
+        if (req.userId) {
+            const u = await User.findById(req.userId).select('email');
+            if (u)
+                toggledBy = u.email;
+        }
+        else {
+            const company = await Company_1.Company.findById(companyId).select('email');
+            toggledBy = company?.email ?? 'unknown';
+        }
+        const now = new Date();
+        await TenantOfferingState_1.TenantOfferingState.findOneAndUpdate({ companyId: companyObjId, offeringId }, {
+            $set: {
+                isActive: isActive ?? false,
+                [isActive ? 'activatedAt' : 'deactivatedAt']: now,
+                toggledBy,
+                deactivationReason: !isActive ? deactivationReason : undefined
+            }
+        }, { upsert: true, new: true });
+        await (0, eventWriter_1.writeCallEvent)({
+            companyId: companyObjId,
+            eventType: 'OFFERING_TOGGLED',
+            offeringId,
+            payload: { isActive: isActive ?? false, toggledBy, deactivationReason: !isActive ? deactivationReason : undefined },
+            source: 'agent',
+            timestamp: now
+        });
+        res.json({ message: 'Offering state updated', isActive: isActive ?? false });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Failed to update offering state' });
+    }
+});
 // DELETE /api/settings/dnd (Tenant Admin, Campaign Manager)
 router.delete('/dnd', auth_1.authMiddleware, (0, auth_1.requireRoles)('TENANT_ADMIN', 'CAMPAIGN_MANAGER'), async (req, res) => {
     try {
@@ -222,6 +333,98 @@ router.delete('/dnd', auth_1.authMiddleware, (0, auth_1.requireRoles)('TENANT_AD
     catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Failed to clear DND list' });
+    }
+});
+// GET /api/settings/datasource (Tenant Admin, Campaign Manager)
+router.get('/datasource', auth_1.authMiddleware, (0, auth_1.requireRoles)('TENANT_ADMIN', 'CAMPAIGN_MANAGER'), async (req, res) => {
+    try {
+        const companyId = req.companyId;
+        const companyObjId = new mongoose_1.default.Types.ObjectId(companyId);
+        let ds = await DataSourceConfig_1.DataSourceConfig.findOne({ companyId: companyObjId }).lean();
+        if (!ds) {
+            ds = {
+                _id: null,
+                companyId: companyObjId,
+                mode: 'file',
+                stalenessThresholdHours: 26,
+                createdAt: new Date(),
+                updatedAt: new Date()
+            };
+        }
+        const stalenessHours = ds.stalenessThresholdHours ?? 26;
+        const cutoff = new Date(Date.now() - stalenessHours * 60 * 60 * 1000);
+        const staleCount = await AccountProfile_1.AccountProfile.countDocuments({
+            companyId: companyObjId,
+            status: { $in: ['ACTIVE', 'PAUSED'] },
+            $or: [{ dataFreshnessAt: { $lt: cutoff } }, { dataFreshnessAt: null }]
+        });
+        const safe = {
+            mode: ds.mode ?? 'file',
+            pullUrl: ds.pullUrl ?? null,
+            pullAuthType: ds.pullAuthType ?? null,
+            pullAuthConfig: ds.pullAuthConfig
+                ? { _masked: true }
+                : null,
+            pullScheduleCron: ds.pullScheduleCron ?? null,
+            fieldMapping: ds.fieldMapping ?? {},
+            stalenessThresholdHours: stalenessHours,
+            lastSyncAt: ds.lastSyncAt ?? null,
+            lastSyncStatus: ds.lastSyncStatus ?? null,
+            pushHmacSecretSet: !!ds.pushHmacSecret,
+            staleAccountCount: staleCount
+        };
+        res.json(safe);
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Failed to load datasource config' });
+    }
+});
+// PUT /api/settings/datasource (Tenant Admin, Campaign Manager)
+router.put('/datasource', auth_1.authMiddleware, (0, auth_1.requireRoles)('TENANT_ADMIN', 'CAMPAIGN_MANAGER'), async (req, res) => {
+    try {
+        const companyId = req.companyId;
+        const companyObjId = new mongoose_1.default.Types.ObjectId(companyId);
+        const body = req.body;
+        const update = {};
+        if (body.mode !== undefined)
+            update.mode = body.mode;
+        if (body.pullUrl !== undefined)
+            update.pullUrl = body.pullUrl || null;
+        if (body.pullAuthType !== undefined)
+            update.pullAuthType = body.pullAuthType || null;
+        if (body.pullAuthConfig !== undefined) {
+            const raw = body.pullAuthConfig;
+            update.pullAuthConfig = raw && Object.keys(raw).length > 0 ? (0, credentialEncryption_1.encryptPullAuthConfig)(raw) : null;
+        }
+        if (body.pullScheduleCron !== undefined)
+            update.pullScheduleCron = body.pullScheduleCron || null;
+        if (body.fieldMapping !== undefined)
+            update.fieldMapping = body.fieldMapping || {};
+        if (body.stalenessThresholdHours !== undefined)
+            update.stalenessThresholdHours = Math.max(1, Math.min(168, body.stalenessThresholdHours));
+        if (body.pushHmacSecret !== undefined && body.pushHmacSecret.trim())
+            update.pushHmacSecret = body.pushHmacSecret.trim();
+        const ds = await DataSourceConfig_1.DataSourceConfig.findOneAndUpdate({ companyId: companyObjId }, { $set: update }, { new: true, upsert: true });
+        res.json({ mode: ds?.mode, lastSyncAt: ds?.lastSyncAt, lastSyncStatus: ds?.lastSyncStatus });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Failed to update datasource config' });
+    }
+});
+// POST /api/settings/datasource/regenerate-hmac (Tenant Admin, Campaign Manager)
+router.post('/datasource/regenerate-hmac', auth_1.authMiddleware, (0, auth_1.requireRoles)('TENANT_ADMIN', 'CAMPAIGN_MANAGER'), async (req, res) => {
+    try {
+        const companyId = req.companyId;
+        const companyObjId = new mongoose_1.default.Types.ObjectId(companyId);
+        const secret = crypto_1.default.randomBytes(32).toString('hex');
+        await DataSourceConfig_1.DataSourceConfig.findOneAndUpdate({ companyId: companyObjId }, { $set: { pushHmacSecret: secret } }, { new: true, upsert: true });
+        res.json({ pushHmacSecret: secret });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Failed to regenerate HMAC secret' });
     }
 });
 exports.default = router;

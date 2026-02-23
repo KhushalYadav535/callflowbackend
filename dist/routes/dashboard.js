@@ -8,17 +8,19 @@ const mongoose_1 = __importDefault(require("mongoose"));
 const auth_1 = require("../middleware/auth");
 const CallLog_1 = require("../models/CallLog");
 const Contact_1 = require("../models/Contact");
+const AccountProfile_1 = require("../models/AccountProfile");
 const router = (0, express_1.Router)();
 // GET /api/dashboard/stats
 router.get('/stats', auth_1.authMiddleware, async (req, res) => {
     try {
         const companyId = req.companyId;
         const companyObjectId = new mongoose_1.default.Types.ObjectId(companyId);
-        const [totalCallsResult, connectedResult, promiseToPayResult, paidResult] = await Promise.all([
+        const [totalCallsResult, connectedResult, promiseToPayResult, paidResult, accountCount] = await Promise.all([
             CallLog_1.CallLog.countDocuments({ companyId: companyObjectId }),
             CallLog_1.CallLog.countDocuments({ companyId: companyObjectId, outcome: 'connected' }),
             Contact_1.Contact.countDocuments({ companyId: companyObjectId, paymentDisposition: 'promise_to_pay' }),
-            Contact_1.Contact.countDocuments({ companyId: companyObjectId, paymentDisposition: 'paid' })
+            Contact_1.Contact.countDocuments({ companyId: companyObjectId, paymentDisposition: 'paid' }),
+            AccountProfile_1.AccountProfile.countDocuments({ companyId: companyObjectId })
         ]);
         const totalCallsMade = totalCallsResult;
         const callsConnected = connectedResult;
@@ -30,7 +32,8 @@ router.get('/stats', auth_1.authMiddleware, async (req, res) => {
             callsConnected,
             promiseToPayCount,
             paidCount,
-            connectRate
+            connectRate,
+            accountCount
         });
     }
     catch (err) {
